@@ -19,7 +19,7 @@ from app.core.config import settings
 from app.core.event import eventmanager, Event
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas.types import EventType, MediaType, SystemConfigKey
+from app.schemas.types import EventType, SystemConfigKey
 from app.utils.system import SystemUtils
 
 lock = threading.Lock()
@@ -52,7 +52,7 @@ class FileSoftLink(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/thsrite/MoviePilot-Plugins/main/icons/softlink.png"
     # 插件版本
-    plugin_version = "1.3"
+    plugin_version = "1.7"
     # 插件作者
     plugin_author = "thsrite"
     # 作者主页
@@ -79,6 +79,9 @@ class FileSoftLink(_PluginBase):
     # 存储源目录与目的目录关系
     _dirconf: Dict[str, Optional[Path]] = {}
     _medias = {}
+
+    _rmt_mediaext = ".mp4, .mkv, .ts, .iso,.rmvb, .avi, .mov, .mpeg,.mpg, .wmv, .3gp, .asf, .m4v, .flv, .m2ts, .strm,.tp, .f4v"
+
     # 退出事件
     _event = threading.Event()
 
@@ -96,6 +99,8 @@ class FileSoftLink(_PluginBase):
             self._exclude_keywords = config.get("exclude_keywords") or ""
             self._cron = config.get("cron")
             self._size = config.get("size") or 0
+            self._rmt_mediaext = config.get(
+                "rmt_mediaext") or ".mp4, .mkv, .ts, .iso,.rmvb, .avi, .mov, .mpeg,.mpg, .wmv, .3gp, .asf, .m4v, .flv, .m2ts, .strm,.tp, .f4v"
 
         # 停止现有任务
         self.stop_service()
@@ -213,7 +218,8 @@ class FileSoftLink(_PluginBase):
             "monitor_dirs": self._monitor_dirs,
             "exclude_keywords": self._exclude_keywords,
             "cron": self._cron,
-            "size": self._size
+            "size": self._size,
+            "rmt_mediaext": self._rmt_mediaext
         })
 
     @eventmanager.register(EventType.PluginAction)
@@ -241,8 +247,11 @@ class FileSoftLink(_PluginBase):
         # 遍历所有监控目录
         for mon_path in self._dirconf.keys():
             # 遍历目录下所有文件
-            for file_path in SystemUtils.list_files(Path(mon_path), ['.*']):
-                self.__handle_file(event_path=str(file_path), mon_path=mon_path)
+            for root, dirs, files in os.walk(mon_path):
+                for name in dirs + files:
+                    path = os.path.join(root, name)
+                    if Path(path).is_file():
+                        self.__handle_file(event_path=str(path), mon_path=mon_path)
         logger.info("全量同步监控目录完成！")
 
     def event_handler(self, event, mon_path: str, text: str, event_path: str):
@@ -309,7 +318,14 @@ class FileSoftLink(_PluginBase):
 
                 # 查询转移目的目录
                 target: Path = self._dirconf.get(mon_path)
-                target_file = str(file_path).replace(str(mon_path), str(target))
+
+                # 去除文件名中的特殊字符
+                sanitized_file_name = self.remove_special_chars(file_path.name)
+                sanitized_file = file_path.with_name(sanitized_file_name)
+                target_file = str(sanitized_file).replace(str(mon_path), str(target))
+
+                # 转义原路径
+                file_path = self.escape_path(str(file_path))
 
                 # 如果是文件夹
                 if Path(target_file).is_dir():
@@ -318,7 +334,11 @@ class FileSoftLink(_PluginBase):
                         os.makedirs(target_file)
                         return
                 else:
-                    # 文件
+                    # 未开启复制非媒体文件且文件类型不在媒体类型列表中，跳过处理
+                    if not self._copy_files and Path(target_file).suffix.lower() not in [ext.strip() for ext in
+                                                                                         self._rmt_mediaext.split(",")]:
+                        return
+                        # 文件
                     if Path(target_file).exists():
                         logger.info(f"目标文件 {target_file} 已存在")
                         return
@@ -328,7 +348,8 @@ class FileSoftLink(_PluginBase):
                         os.makedirs(Path(target_file).parent)
 
                     # 媒体文件软连接
-                    if Path(target_file).suffix in settings.RMT_MEDIAEXT:
+                    if Path(target_file).suffix.lower() in [ext.strip() for ext in
+                                                            self._rmt_mediaext.split(",")]:
                         retcode, retmsg = SystemUtils.softlink(file_path, Path(target_file))
                         logger.info(f"创建媒体文件软连接 {str(file_path)} 到 {target_file} {retcode} {retmsg}")
                     else:
@@ -338,6 +359,17 @@ class FileSoftLink(_PluginBase):
                             logger.info(f"复制其他文件 {str(file_path)} 到 {target_file}")
         except Exception as e:
             logger.error("软连接发生错误：%s - %s" % (str(e), traceback.format_exc()))
+
+    @staticmethod
+    def remove_special_chars(filename):
+        """去除字符串中的特殊字符，只保留字母、数字、点、下划线和横线。"""
+        return re.sub(r'[^a-zA-Z0-9._-]', '', filename)
+
+    @staticmethod
+    def escape_path(path):
+        """转义路径中的空格和特殊字符。"""
+        return path.replace(' ', '\\ ').replace('(', '\\(').replace(')', '\\)').replace('\'', '\\\'').replace('"',
+                                                                                                              '\\"')
 
     def get_state(self) -> bool:
         return self._enabled
@@ -562,6 +594,28 @@ class FileSoftLink(_PluginBase):
                             {
                                 'component': 'VCol',
                                 'props': {
+                                    'cols': 12
+                                },
+                                'content': [
+                                    {
+                                        'component': 'VTextarea',
+                                        'props': {
+                                            'model': 'rmt_mediaext',
+                                            'label': '视频格式',
+                                            'rows': 2,
+                                            'placeholder': ".mp4, .mkv, .ts, .iso,.rmvb, .avi, .mov, .mpeg,.mpg, .wmv, .3gp, .asf, .m4v, .flv, .m2ts, .strm,.tp, .f4v"
+                                        }
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {
+                                'component': 'VCol',
+                                'props': {
                                     'cols': 12,
                                 },
                                 'content': [
@@ -587,7 +641,8 @@ class FileSoftLink(_PluginBase):
             "monitor_dirs": "",
             "exclude_keywords": "",
             "cron": "",
-            "size": 0
+            "size": 0,
+            "rmt_mediaext": ".mp4, .mkv, .ts, .iso,.rmvb, .avi, .mov, .mpeg,.mpg, .wmv, .3gp, .asf, .m4v, .flv, .m2ts, .strm,.tp, .f4v"
         }
 
     def get_page(self) -> List[dict]:
